@@ -78,18 +78,6 @@ jobs:
         with:
           gradle-version: '8.12'
 
-      - name: Show Gradle configuration
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          echo "=== Project directory ==="
-          pwd
-          echo "=== Gradle build files ==="
-          ls -la build.gradle* settings.gradle* gradle.properties 2>/dev/null || true
-          echo "=== Fabric Loom declarations ==="
-          grep -n -E 'fabric-loom|minecraft|fabric-loader|archives_base_name|archivesName' \
-            build.gradle build.gradle.kts gradle.properties 2>/dev/null || true
-
       - name: Validate Fabric metadata
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -104,99 +92,66 @@ jobs:
             exit 1
           fi
 
-          python3 -m json.tool "$FILE" >/dev/null
+          python3 -m json.tool "$FILE" > /dev/null
           echo "fabric.mod.json is valid JSON."
 
       - name: Build mod and sources JAR
         working-directory: ${{ env.PROJECT_DIR }}
         run: gradle --no-daemon clean build
 
-      - name: Verify JAR contents (diagnostic)
+      - name: Verify JAR contents
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
           echo "=== Project directory ==="
           pwd
 
           echo "=== Java sources ==="
-          find src -type f -name '*.java' 2>/dev/null | head -100 || true
+          find src -type f -name '*.java' | head -100 || true
 
           echo "=== Compiled classes ==="
-          find build/classes -type f -name '*.class' 2>/dev/null | head -100 || true
+          find build/classes -type f -name '*.class' | head -100 || true
 
           echo "=== Build output ==="
-          if [ ! -d build/libs ]; then
-            echo "ERROR: build/libs does not exist."
-            exit 1
-          fi
+          ls -lah build/libs/
 
-          ls -lah build/libs
+          J=""
+          for f in build/libs/*.jar; do
+            [ -f "$f" ] || continue
+            [[ "$f" == *-sources.jar ]] && continue
 
-          shopt -s nullglob
-          JARS=(build/libs/*.jar)
-
-          if [ ${#JARS[@]} -eq 0 ]; then
-            echo "ERROR: No JAR files were generated."
-            exit 1
-          fi
-
-          for J in "${JARS[@]}"; do
-            echo
-            echo "=== Contents: $J ==="
-            unzip -l "$J" | head -100 || true
-          done
-
-          MAIN_JAR=""
-
-          for J in "${JARS[@]}"; do
-            if [[ "$J" != *-sources.jar ]] &&
-               unzip -Z1 "$J" | grep -qx 'fabric.mod.json'; then
-              MAIN_JAR="$J"
+            if unzip -Z1 "$f" | grep -qx 'fabric.mod.json'; then
+              J="$f"
               break
             fi
           done
 
-          if [ -z "$MAIN_JAR" ]; then
-            echo "ERROR: No non-sources JAR containing fabric.mod.json was found."
+          if [ -z "$J" ]; then
+            echo "ERROR: Main mod JAR not found."
             exit 1
           fi
 
-          echo
-          echo "Selected main JAR: $MAIN_JAR"
+          echo "Selected JAR: $J"
 
-          unzip -Z1 "$MAIN_JAR" > jar.txt
+          CONTENTS=$(unzip -Z1 "$J")
 
-          echo "=== ZENIX-related entries ==="
-          grep -iE 'zenix|AttackAura|BaseFinder|BotsScreen|fabric\.mod\.json' \
-            jar.txt | head -150 || true
-
-          MISSING=0
-
-          for f in \
-            fabric.mod.json \
-            gg/zenix/client/ZenixClient.class \
-            gg/zenix/client/modules/AttackAuraModule.class \
-            gg/zenix/client/modules/BaseFinderModule.class \
-            gg/zenix/client/bots/BotsScreen.class
-          do
-            if grep -Fxq "$f" jar.txt; then
-              echo "FOUND: $f"
+          check_class() {
+            if printf '%s\n' "$CONTENTS" | grep -Fxq "$1"; then
+              echo "FOUND: $1"
             else
-              echo "MISSING: $f"
-              MISSING=1
+              echo "MISSING: $1"
+              exit 1
             fi
-          done
+          }
 
-          if [ "$MISSING" -ne 0 ]; then
-            echo
-            echo "WARNING: Some expected classes are missing."
-            echo "The diagnostic output above will help identify the actual package names and compiled files."
-            exit 1
-          fi
+          check_class "fabric.mod.json"
+          check_class "com/zenix/Zenix.class"
+          check_class "com/zenix/modules/BaseFinder.class"
+          check_class "com/zenix/ui/BotsScreen.class"
 
-          echo "All expected classes were found."
+          echo "JAR verification passed."
 
       - name: Upload build artifacts
         if: always()
